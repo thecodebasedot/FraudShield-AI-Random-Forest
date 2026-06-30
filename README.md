@@ -37,11 +37,24 @@ FraudShield-AI-Random-Forest/
 │   ├── model.py            # preprocessing + RandomForest pipeline
 │   ├── train.py            # train, evaluate, persist the model
 │   ├── evaluate.py         # metrics + feature importances
-│   └── predict.py          # score new transactions (FraudDetector + CLI)
+│   ├── predict.py          # score new transactions (FraudDetector + CLI)
+│   ├── api.py              # FastAPI REST service
+│   ├── dashboard.py        # Streamlit web dashboard
+│   ├── compare_models.py   # model comparison + hyperparameter tuning
+│   ├── explain.py          # SHAP per-transaction explainability
+│   ├── realdata.py         # train on a real numeric dataset (e.g. Kaggle)
+│   └── visualize.py        # generate evaluation charts
+├── notebooks/
+│   └── eda.ipynb           # exploratory data analysis
 ├── tests/
-│   └── test_pipeline.py    # smoke tests for data, training, prediction
+│   ├── test_pipeline.py    # data, training, prediction
+│   └── test_features.py    # SHAP explainer + real-dataset trainer
+├── .github/workflows/      # GitHub Actions CI
+├── reports/                # generated evaluation charts (PNG)
 ├── data/                   # generated CSVs (git-ignored)
 ├── models/                 # saved model + metrics (git-ignored)
+├── Dockerfile              # container image (serves the API)
+├── docker-compose.yml
 └── requirements.txt
 ```
 
@@ -104,6 +117,134 @@ verdict = detector.score({
 print(verdict)
 # {'fraud_probability': 0.88, 'is_fraud': True, 'risk_level': 'HIGH'}
 ```
+
+## 🎛️ Interactive dashboard
+
+A **Streamlit** UI to score transactions in the browser — single transaction
+form *and* batch CSV upload with a downloadable scored file.
+
+```bash
+streamlit run src/dashboard.py
+```
+
+Opens at http://localhost:8501. Adjust the decision threshold live from the sidebar.
+
+## 🤖 Model comparison & tuning
+
+FraudShield ships with a Random Forest, but you can verify that choice and tune it:
+
+```bash
+python -m src.compare_models           # 5-fold CV across models + RF tuning
+python -m src.compare_models --save    # persist the tuned best model
+```
+
+It cross-validates **LogisticRegression**, **RandomForest** and **GradientBoosting**
+on ROC-AUC, then runs a `RandomizedSearchCV` over the forest's hyperparameters and
+writes the ranking to `models/comparison.json`. A typical run:
+
+```
+LogisticRegression   ROC-AUC = 0.851
+RandomForest         ROC-AUC = 0.854   <- best
+GradientBoosting     ROC-AUC = 0.853
+Tuned RandomForest   ROC-AUC = 0.865
+```
+
+## 🔍 Explainability (SHAP)
+
+Every flag comes with a **reason**. SHAP attributes a prediction to individual
+features so analysts know *why* a transaction was flagged:
+
+```bash
+python -m src.explain     # or POST /explain on the API
+```
+
+```json
+{
+  "fraud_probability": 0.88, "is_fraud": true, "risk_level": "HIGH",
+  "reasons": ["young account", "unusual transaction hour",
+              "high transaction amount", "high transaction velocity (1h)",
+              "new / unseen device"]
+}
+```
+
+The Streamlit dashboard shows the same reasons plus a contribution bar chart.
+
+## 🗃️ Train on a real dataset
+
+Beyond the synthetic data, you can train on any **numeric** fraud dataset — e.g.
+Kaggle's [Credit Card Fraud Detection](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud)
+(`Time`, `V1..V28`, `Amount`, `Class`):
+
+```bash
+python -m src.realdata --data creditcard.csv --target Class
+```
+
+It auto-detects the numeric feature columns, trains a balanced Random Forest and
+saves a separate model to `models/fraudshield_real.joblib`.
+
+## 📓 Exploratory data analysis
+
+`notebooks/eda.ipynb` walks through class balance, amount/hour distributions and
+feature–label correlations (run with `jupyter notebook` from the repo root).
+
+## 🐳 Docker
+
+Build and run the API in a container (a model is trained at build time):
+
+```bash
+docker compose up --build
+# API now live at http://localhost:8000  (docs at /docs)
+```
+
+## ⚙️ Continuous Integration
+
+Every push / PR runs the test suite plus a train+predict smoke test across
+Python 3.10–3.12 via GitHub Actions (`.github/workflows/ci.yml`).
+
+## 🌐 REST API
+
+Serve the model over HTTP with **FastAPI**:
+
+```bash
+uvicorn src.api:app --reload
+```
+
+Then visit **http://127.0.0.1:8000/docs** for interactive Swagger UI.
+
+| Method | Endpoint          | Description                          |
+|--------|-------------------|--------------------------------------|
+| GET    | `/health`         | model status & threshold             |
+| POST   | `/predict`        | score a single transaction           |
+| POST   | `/predict/batch`  | score a list of transactions         |
+| POST   | `/explain`        | score **with SHAP reasons**          |
+
+```bash
+curl -X POST http://127.0.0.1:8000/predict \
+  -H "Content-Type: application/json" \
+  -d '{"amount":1450.0,"hour":3,"txn_count_1h":7,"txn_count_24h":25,
+       "foreign_transaction":1,"account_age_days":12,"is_new_device":1,
+       "merchant_category":"money_transfer","device_type":"web"}'
+# {"fraud_probability":0.88,"is_fraud":true,"risk_level":"HIGH"}
+```
+
+Requests are validated (e.g. `hour` must be 0–23) and the model is loaded lazily,
+so the service boots even before a model exists — it returns `503` until you train one.
+
+## 📈 Visualization
+
+Generate evaluation charts into `reports/`:
+
+```bash
+python -m src.visualize
+```
+
+| ROC curve | Confusion matrix |
+|-----------|------------------|
+| ![ROC curve](reports/roc_curve.png) | ![Confusion matrix](reports/confusion_matrix.png) |
+
+| Feature importance | Fraud-score separation |
+|--------------------|------------------------|
+| ![Feature importance](reports/feature_importance.png) | ![Probability distribution](reports/probability_distribution.png) |
 
 ## 📊 Example results
 
