@@ -41,9 +41,14 @@ FraudShield-AI-Random-Forest/
 │   ├── api.py              # FastAPI REST service
 │   ├── dashboard.py        # Streamlit web dashboard
 │   ├── compare_models.py   # model comparison + hyperparameter tuning
+│   ├── explain.py          # SHAP per-transaction explainability
+│   ├── realdata.py         # train on a real numeric dataset (e.g. Kaggle)
 │   └── visualize.py        # generate evaluation charts
+├── notebooks/
+│   └── eda.ipynb           # exploratory data analysis
 ├── tests/
-│   └── test_pipeline.py    # smoke tests for data, training, prediction
+│   ├── test_pipeline.py    # data, training, prediction
+│   └── test_features.py    # SHAP explainer + real-dataset trainer
 ├── .github/workflows/      # GitHub Actions CI
 ├── reports/                # generated evaluation charts (PNG)
 ├── data/                   # generated CSVs (git-ignored)
@@ -144,6 +149,44 @@ GradientBoosting     ROC-AUC = 0.853
 Tuned RandomForest   ROC-AUC = 0.865
 ```
 
+## 🔍 Explainability (SHAP)
+
+Every flag comes with a **reason**. SHAP attributes a prediction to individual
+features so analysts know *why* a transaction was flagged:
+
+```bash
+python -m src.explain     # or POST /explain on the API
+```
+
+```json
+{
+  "fraud_probability": 0.88, "is_fraud": true, "risk_level": "HIGH",
+  "reasons": ["young account", "unusual transaction hour",
+              "high transaction amount", "high transaction velocity (1h)",
+              "new / unseen device"]
+}
+```
+
+The Streamlit dashboard shows the same reasons plus a contribution bar chart.
+
+## 🗃️ Train on a real dataset
+
+Beyond the synthetic data, you can train on any **numeric** fraud dataset — e.g.
+Kaggle's [Credit Card Fraud Detection](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud)
+(`Time`, `V1..V28`, `Amount`, `Class`):
+
+```bash
+python -m src.realdata --data creditcard.csv --target Class
+```
+
+It auto-detects the numeric feature columns, trains a balanced Random Forest and
+saves a separate model to `models/fraudshield_real.joblib`.
+
+## 📓 Exploratory data analysis
+
+`notebooks/eda.ipynb` walks through class balance, amount/hour distributions and
+feature–label correlations (run with `jupyter notebook` from the repo root).
+
 ## 🐳 Docker
 
 Build and run the API in a container (a model is trained at build time):
@@ -173,6 +216,7 @@ Then visit **http://127.0.0.1:8000/docs** for interactive Swagger UI.
 | GET    | `/health`         | model status & threshold             |
 | POST   | `/predict`        | score a single transaction           |
 | POST   | `/predict/batch`  | score a list of transactions         |
+| POST   | `/explain`        | score **with SHAP reasons**          |
 
 ```bash
 curl -X POST http://127.0.0.1:8000/predict \

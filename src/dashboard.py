@@ -114,6 +114,30 @@ def _single_transaction_tab(detector: FraudDetector) -> None:
         )
         st.progress(min(1.0, result["fraud_probability"]))
 
+        _show_explanation(transaction)
+
+
+def _show_explanation(transaction: dict) -> None:
+    """Render SHAP-based reasons under the verdict (best-effort)."""
+    with st.expander("🔍 Why? (SHAP explanation)", expanded=True):
+        try:
+            from src.explain import get_explainer
+
+            explained = get_explainer(DEFAULT_MODEL_PATH).explain(transaction)
+        except Exception as exc:  # shap missing or any runtime issue
+            st.info(f"Explanation unavailable: {exc}")
+            return
+
+        reasons = explained.get("reasons") or []
+        if reasons:
+            st.write("**Top risk factors:**")
+            for reason in reasons:
+                st.write(f"- {reason}")
+        contributions = explained.get("explanation", [])
+        if contributions:
+            chart_df = pd.DataFrame(contributions).set_index("feature")["shap_value"]
+            st.bar_chart(chart_df)
+
 
 def _batch_tab(detector: FraudDetector) -> None:
     st.subheader("Score a batch of transactions")

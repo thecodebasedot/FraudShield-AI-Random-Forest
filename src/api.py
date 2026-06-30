@@ -67,6 +67,17 @@ class Verdict(BaseModel):
     risk_level: str
 
 
+class FeatureContribution(BaseModel):
+    feature: str
+    shap_value: float
+    direction: str
+
+
+class ExplainedVerdict(Verdict):
+    explanation: list[FeatureContribution]
+    reasons: list[str]
+
+
 class BatchRequest(BaseModel):
     transactions: list[Transaction]
 
@@ -109,3 +120,16 @@ def predict_batch(request: BatchRequest) -> list[Verdict]:
         raise HTTPException(status_code=400, detail="No transactions provided.")
     results = detector.score_many([t.model_dump() for t in request.transactions])
     return [Verdict(**r) for r in results]
+
+
+@app.post("/explain", response_model=ExplainedVerdict, tags=["scoring"])
+def explain(transaction: Transaction) -> ExplainedVerdict:
+    """Score a transaction and explain it with SHAP feature attributions."""
+    # Imported here so the heavier SHAP dependency only loads if /explain is used.
+    from .explain import get_explainer
+
+    # Reuse the same model the detector validated is present.
+    get_detector()
+    explainer = get_explainer(MODEL_PATH)
+    result = explainer.explain(transaction.model_dump())
+    return ExplainedVerdict(**result)
