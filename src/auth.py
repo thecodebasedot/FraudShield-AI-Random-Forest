@@ -26,20 +26,28 @@ def hash_key(raw_key: str) -> str:
     return hashlib.sha256(raw_key.encode()).hexdigest()
 
 
-def create_api_key(name: str) -> str:
-    """Create a named API key and return the raw token (shown once)."""
+def create_api_key(name: str, tenant: str = "default") -> str:
+    """Create a named API key for a tenant and return the raw token (shown once)."""
     init_db()
     raw_key = "fsk_" + secrets.token_urlsafe(32)
     with session_scope() as session:
         existing = session.scalar(select(ApiKey).where(ApiKey.name == name))
         if existing:
             raise ValueError(f"An API key named {name!r} already exists.")
-        session.add(ApiKey(name=name, key_hash=hash_key(raw_key), active=True))
+        session.add(
+            ApiKey(name=name, tenant=tenant, key_hash=hash_key(raw_key), active=True)
+        )
     return raw_key
 
 
 def verify_api_key(raw_key: str | None) -> str | None:
     """Return the key's name if valid and active, else None."""
+    principal = resolve_api_key(raw_key)
+    return principal["name"] if principal else None
+
+
+def resolve_api_key(raw_key: str | None) -> dict | None:
+    """Return {"name", "tenant"} for a valid active key, else None."""
     if not raw_key:
         return None
     with session_scope() as session:
@@ -48,14 +56,19 @@ def verify_api_key(raw_key: str | None) -> str | None:
                 ApiKey.key_hash == hash_key(raw_key), ApiKey.active.is_(True)
             )
         )
-        return row.name if row else None
+        return {"name": row.name, "tenant": row.tenant} if row else None
 
 
 def list_api_keys() -> list[dict]:
     with session_scope() as session:
         rows = session.scalars(select(ApiKey).order_by(ApiKey.created_at)).all()
         return [
-            {"name": r.name, "active": r.active, "created_at": r.created_at.isoformat()}
+            {
+                "name": r.name,
+                "tenant": r.tenant,
+                "active": r.active,
+                "created_at": r.created_at.isoformat(),
+            }
             for r in rows
         ]
 
@@ -81,7 +94,7 @@ def require_api_key():
     """
     from fastapi import Header, HTTPException
 
-    def _dependency(x_api_key: str | None = Header(default=None)) -> str | None:
+    def _dependency(x_api_key: str | None = Header(default=None)) -> dict | None:
         with session_scope() as session:
             from sqlalchemy import func
 
@@ -94,10 +107,10 @@ def require_api_key():
         if key_count == 0:
             return None  # open mode: no keys configured yet
 
-        name = verify_api_key(x_api_key)
-        if name is None:
+        principal = resolve_api_key(x_api_key)
+        if principal is None:
             raise HTTPException(status_code=401, detail="Invalid or missing API key.")
-        return name
+        return principal  # {"name": ..., "tenant": ...}
 
     return _dependency
 
@@ -108,6 +121,7 @@ def _main() -> None:
 
     p_create = sub.add_parser("create", help="create a new API key")
     p_create.add_argument("--name", required=True)
+    p_create.add_argument("--tenant", default="default", help="tenant this key belongs to")
 
     sub.add_parser("list", help="list API keys")
 
@@ -117,13 +131,16 @@ def _main() -> None:
     args = parser.parse_args()
 
     if args.command == "create":
-        raw = create_api_key(args.name)
-        print("API key created. Store it now — it will NOT be shown again:\n")
+        raw = create_api_key(args.name, tenant=args.tenant)
+        print(
+            f"API key created for tenant {args.tenant!r}. "
+            "Store it now — it will NOT be shown again:\n"
+        )
         print(f"  {raw}\n")
     elif args.command == "list":
         for k in list_api_keys():
             status = "active" if k["active"] else "revoked"
-            print(f"  {k['name']:<24} {status:<8} {k['created_at']}")
+            print(f"  {k['name']:<24} {k['tenant']:<16} {status:<8} {k['created_at']}")
     elif args.command == "revoke":
         ok = revoke_api_key(args.name)
         print("Revoked." if ok else "No such key.")

@@ -20,10 +20,14 @@ from typing import Literal
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from fastapi.responses import JSONResponse
+from starlette.requests import Request
+
 from . import alerts, db
 from .auth import require_api_key
 from .cache import PredictionCache, cached_score
 from .predict import DEFAULT_MODEL_PATH, DEFAULT_THRESHOLD, FraudDetector
+from .security import SECURITY_HEADERS, RateLimiter
 
 MODEL_PATH = os.environ.get("FRAUDSHIELD_MODEL", DEFAULT_MODEL_PATH)
 THRESHOLD = float(os.environ.get("FRAUDSHIELD_THRESHOLD", DEFAULT_THRESHOLD))
@@ -43,10 +47,33 @@ _cache = PredictionCache()
 # Shared auth dependency (open until the first API key is created).
 api_key_dep = require_api_key()
 
+# Per-client rate limiter (token bucket).
+_rate_limiter = RateLimiter()
+
 
 @app.on_event("startup")
 def _startup() -> None:
     db.init_db()
+
+
+@app.middleware("http")
+async def _security_middleware(request: Request, call_next):
+    """Enforce per-client rate limits and attach security headers."""
+    # Identify the client by API key if present, else by source IP.
+    client_id = request.headers.get("x-api-key") or (
+        request.client.host if request.client else "anonymous"
+    )
+    if not _rate_limiter.allow(client_id):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded. Slow down."},
+            headers=SECURITY_HEADERS,
+        )
+
+    response = await call_next(request)
+    for header, value in SECURITY_HEADERS.items():
+        response.headers[header] = value
+    return response
 
 
 def get_detector() -> FraudDetector:
@@ -62,13 +89,23 @@ def get_detector() -> FraudDetector:
     return _detector
 
 
-def _persist_and_alert(transaction: dict, verdict: dict, api_key_name: str | None) -> None:
+def _principal(p: dict | None) -> tuple[str | None, str]:
+    """Split the auth principal into (api_key_name, tenant)."""
+    if not p:
+        return None, "default"
+    return p.get("name"), p.get("tenant", "default")
+
+
+def _persist_and_alert(
+    transaction: dict, verdict: dict, api_key_name: str | None, tenant: str = "default"
+) -> None:
     """Record the prediction, audit it and fire alerts — best effort."""
     try:
-        db.record_prediction(transaction, verdict, api_key_name=api_key_name)
+        db.record_prediction(transaction, verdict, api_key_name=api_key_name, tenant=tenant)
         db.record_audit(
             action="predict",
             api_key_name=api_key_name,
+            tenant=tenant,
             detail=f"risk={verdict['risk_level']} p={verdict['fraud_probability']}",
         )
     except Exception:  # persistence must never break scoring
@@ -137,57 +174,63 @@ def health() -> dict:
 
 
 @app.post("/predict", response_model=Verdict, tags=["scoring"])
-def predict(transaction: Transaction, api_key_name: str | None = Depends(api_key_dep)) -> Verdict:
+def predict(transaction: Transaction, principal: dict | None = Depends(api_key_dep)) -> Verdict:
     """Score a single transaction (served from cache when seen recently)."""
+    name, tenant = _principal(principal)
     detector = get_detector()
     txn = transaction.model_dump()
     result = cached_score(detector, _cache, txn)
-    _persist_and_alert(txn, result, api_key_name)
+    _persist_and_alert(txn, result, name, tenant)
     return Verdict(**result)
 
 
 @app.post("/predict/batch", response_model=list[Verdict], tags=["scoring"])
 def predict_batch(
-    request: BatchRequest, api_key_name: str | None = Depends(api_key_dep)
+    request: BatchRequest, principal: dict | None = Depends(api_key_dep)
 ) -> list[Verdict]:
     """Score many transactions in one call."""
+    name, tenant = _principal(principal)
     detector = get_detector()
     if not request.transactions:
         raise HTTPException(status_code=400, detail="No transactions provided.")
     txns = [t.model_dump() for t in request.transactions]
     results = detector.score_many(txns)
     for txn, result in zip(txns, results):
-        _persist_and_alert(txn, result, api_key_name)
+        _persist_and_alert(txn, result, name, tenant)
     return [Verdict(**r) for r in results]
 
 
 @app.post("/explain", response_model=ExplainedVerdict, tags=["scoring"])
 def explain(
-    transaction: Transaction, api_key_name: str | None = Depends(api_key_dep)
+    transaction: Transaction, principal: dict | None = Depends(api_key_dep)
 ) -> ExplainedVerdict:
     """Score a transaction and explain it with SHAP feature attributions."""
     # Imported here so the heavier SHAP dependency only loads if /explain is used.
     from .explain import get_explainer
 
+    name, tenant = _principal(principal)
     # Reuse the same model the detector validated is present.
     get_detector()
     txn = transaction.model_dump()
     explainer = get_explainer(MODEL_PATH)
     result = explainer.explain(txn)
-    _persist_and_alert(txn, result, api_key_name)
+    _persist_and_alert(txn, result, name, tenant)
     return ExplainedVerdict(**result)
 
 
 @app.get("/stats", tags=["admin"])
-def stats(api_key_name: str | None = Depends(api_key_dep)) -> dict:
-    """Aggregate analytics over everything scored so far."""
-    return db.stats_summary()
+def stats(principal: dict | None = Depends(api_key_dep)) -> dict:
+    """Aggregate analytics, scoped to the caller's tenant when authenticated."""
+    _, tenant = _principal(principal)
+    # In open mode (no keys) show everything; once authenticated, scope to tenant.
+    return db.stats_summary(tenant=None if principal is None else tenant)
 
 
 @app.get("/predictions", tags=["admin"])
 def predictions(
-    limit: int = 50, api_key_name: str | None = Depends(api_key_dep)
+    limit: int = 50, principal: dict | None = Depends(api_key_dep)
 ) -> list[dict]:
-    """Most recent scored transactions (newest first)."""
+    """Most recent scored transactions for the caller's tenant (newest first)."""
+    _, tenant = _principal(principal)
     limit = max(1, min(limit, 500))
-    return db.recent_predictions(limit=limit)
+    return db.recent_predictions(limit=limit, tenant=None if principal is None else tenant)

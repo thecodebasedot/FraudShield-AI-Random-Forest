@@ -10,6 +10,9 @@ xgboost>=2.0
 redis>=5.0
 kafka-python-ng>=2.2
 
+# Enterprise: field-level encryption (PCI-DSS)
+cryptography>=42.0
+
 # REST API + persistence
 fastapi>=0.110
 uvicorn[standard]>=0.27

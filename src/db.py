@@ -52,6 +52,7 @@ class Prediction(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+    tenant: Mapped[str] = mapped_column(String(64), default="default", index=True)
 
     # Transaction features (denormalized for easy querying / analytics).
     amount: Mapped[float] = mapped_column(Float)
@@ -80,6 +81,7 @@ class AuditLog(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
     action: Mapped[str] = mapped_column(String(64), index=True)
+    tenant: Mapped[str] = mapped_column(String(64), default="default", index=True)
     api_key_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
     detail: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
@@ -91,6 +93,7 @@ class ApiKey(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(64), unique=True)
+    tenant: Mapped[str] = mapped_column(String(64), default="default", index=True)
     key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
@@ -118,10 +121,16 @@ def session_scope() -> Iterator[Session]:
 # --------------------------------------------------------------------------- #
 # Write helpers
 # --------------------------------------------------------------------------- #
-def record_prediction(transaction: dict, verdict: dict, api_key_name: str | None = None) -> int:
+def record_prediction(
+    transaction: dict,
+    verdict: dict,
+    api_key_name: str | None = None,
+    tenant: str = "default",
+) -> int:
     """Persist a scored transaction; returns the new row id."""
     with session_scope() as session:
         row = Prediction(
+            tenant=tenant,
             amount=transaction["amount"],
             hour=transaction["hour"],
             txn_count_1h=transaction["txn_count_1h"],
@@ -141,32 +150,44 @@ def record_prediction(transaction: dict, verdict: dict, api_key_name: str | None
         return row.id
 
 
-def record_audit(action: str, api_key_name: str | None = None, detail: str | None = None) -> None:
+def record_audit(
+    action: str,
+    api_key_name: str | None = None,
+    detail: str | None = None,
+    tenant: str = "default",
+) -> None:
     """Append an audit-trail entry."""
     with session_scope() as session:
-        session.add(AuditLog(action=action, api_key_name=api_key_name, detail=detail))
+        session.add(
+            AuditLog(action=action, tenant=tenant, api_key_name=api_key_name, detail=detail)
+        )
 
 
 # --------------------------------------------------------------------------- #
 # Read helpers (analytics)
 # --------------------------------------------------------------------------- #
-def stats_summary() -> dict:
-    """Aggregate stats for the admin dashboard."""
+def stats_summary(tenant: str | None = None) -> dict:
+    """Aggregate stats for the admin dashboard, optionally scoped to a tenant."""
+
+    def _scoped(stmt):
+        return stmt.where(Prediction.tenant == tenant) if tenant else stmt
+
     with session_scope() as session:
-        total = session.scalar(select(func.count(Prediction.id))) or 0
+        total = session.scalar(_scoped(select(func.count(Prediction.id)))) or 0
         fraud = session.scalar(
-            select(func.count(Prediction.id)).where(Prediction.is_fraud.is_(True))
+            _scoped(select(func.count(Prediction.id)).where(Prediction.is_fraud.is_(True)))
         ) or 0
-        avg_prob = session.scalar(select(func.avg(Prediction.fraud_probability)))
+        avg_prob = session.scalar(_scoped(select(func.avg(Prediction.fraud_probability))))
 
         by_risk = dict(
             session.execute(
-                select(Prediction.risk_level, func.count(Prediction.id)).group_by(
-                    Prediction.risk_level
-                )
+                _scoped(
+                    select(Prediction.risk_level, func.count(Prediction.id))
+                ).group_by(Prediction.risk_level)
             ).all()
         )
         return {
+            "tenant": tenant or "all",
             "total_transactions": int(total),
             "fraud_flagged": int(fraud),
             "fraud_rate": (float(fraud) / total) if total else 0.0,
@@ -175,12 +196,15 @@ def stats_summary() -> dict:
         }
 
 
-def recent_predictions(limit: int = 50) -> list[dict]:
-    """Most recent predictions, newest first."""
+def recent_predictions(limit: int = 50, tenant: str | None = None) -> list[dict]:
+    """Most recent predictions, newest first, optionally scoped to a tenant."""
     with session_scope() as session:
-        rows = session.scalars(
-            select(Prediction).order_by(Prediction.created_at.desc()).limit(limit)
-        ).all()
+        stmt = select(Prediction).order_by(Prediction.created_at.desc()).limit(limit)
+        if tenant:
+            stmt = select(Prediction).where(Prediction.tenant == tenant).order_by(
+                Prediction.created_at.desc()
+            ).limit(limit)
+        rows = session.scalars(stmt).all()
         return [
             {
                 "id": r.id,

@@ -47,16 +47,20 @@ FraudShield-AI-Random-Forest/
 │   ├── ensemble.py         # RandomForest + XGBoost + GB soft-voting ensemble
 │   ├── cache.py            # Redis cache (in-memory fallback)
 │   ├── streaming.py        # Kafka streaming pipeline (+ simulation mode)
+│   ├── security.py         # encryption, PAN masking, rate limit, headers
 │   ├── explain.py          # SHAP per-transaction explainability
 │   ├── realdata.py         # train on a real numeric dataset (e.g. Kaggle)
 │   └── visualize.py        # generate evaluation charts
+├── k8s/                    # Kubernetes manifests (deploy, HPA, ingress, ...)
 ├── notebooks/
 │   └── eda.ipynb           # exploratory data analysis
 ├── tests/
 │   ├── test_pipeline.py    # data, training, prediction
 │   ├── test_features.py    # SHAP explainer + real-dataset trainer
 │   ├── test_platform.py    # database, auth and alerts
-│   └── test_scaling.py     # ensemble, cache and streaming
+│   ├── test_scaling.py     # ensemble, cache and streaming
+│   └── test_compliance.py  # security helpers + multi-tenancy
+├── COMPLIANCE.md           # PCI-DSS control mapping
 ├── .github/workflows/      # GitHub Actions CI
 ├── reports/                # generated evaluation charts (PNG)
 ├── data/                   # generated CSVs (git-ignored)
@@ -203,6 +207,40 @@ fallback so nothing is ever lost). All optional, configured via env vars:
 The dashboard's **Admin analytics** tab (and the `/stats` + `/predictions`
 endpoints) show live totals, fraud rate, risk-level breakdown and the most
 recent scored transactions — all read from the database.
+
+## 🏢 Enterprise (multi-tenant · security · Kubernetes)
+
+The features a bank needs before it can buy.
+
+### 🏬 Multi-tenancy
+
+Every API key belongs to a **tenant**. Predictions, audit logs and analytics are
+isolated per tenant — one client never sees another's data.
+
+```bash
+python -m src.auth create --name bank-a-key --tenant bank-a
+python -m src.auth create --name bank-b-key --tenant bank-b
+# /stats and /predictions are automatically scoped to the caller's tenant
+```
+
+### 🔒 Security & PCI-DSS controls (`src/security.py`)
+
+- **Field-level encryption** at rest (Fernet) — `python -m src.security genkey`
+- **PAN masking** — card numbers masked to last 4 before logging
+- **Rate limiting** — per-client token bucket (`RATE_LIMIT_PER_MINUTE`)
+- **Security headers** — HSTS, `X-Frame-Options`, CSP, no-sniff on every response
+
+See **[COMPLIANCE.md](COMPLIANCE.md)** for the full PCI-DSS v4.0 control mapping.
+
+### ☸️ Kubernetes
+
+Production manifests in **[`k8s/`](k8s/)** — Deployment (3 replicas, non-root,
+health probes), Service, ConfigMap, Secret template, TLS Ingress and an HPA that
+autoscales **3 → 20 pods** on CPU/memory.
+
+```bash
+kubectl apply -f k8s/
+```
 
 ## ⚡ Scaling (ensemble · caching · streaming)
 
