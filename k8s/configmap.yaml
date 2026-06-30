@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fraudshield-config
+data:
+  FRAUDSHIELD_THRESHOLD: "0.5"
+  FRAUDSHIELD_ALERT_LEVEL: "HIGH"
+  RATE_LIMIT_PER_MINUTE: "120"
+  CACHE_TTL_SECONDS: "300"
+  REDIS_URL: "redis://fraudshield-redis:6379/0"
+  KAFKA_BOOTSTRAP_SERVERS: "fraudshield-kafka:9092"
+  # Non-secret datasource host; the password belongs in the Secret below.
+  # DATABASE_URL is assembled in the Secret to keep credentials out of the ConfigMap.

@@ -62,13 +62,18 @@ def main() -> None:
         )
         st.stop()
 
-    tab_single, tab_batch = st.tabs(["🔎 Single transaction", "📁 Batch CSV"])
+    tab_single, tab_batch, tab_admin = st.tabs(
+        ["🔎 Single transaction", "📁 Batch CSV", "📊 Admin analytics"]
+    )
 
     with tab_single:
         _single_transaction_tab(detector)
 
     with tab_batch:
         _batch_tab(detector)
+
+    with tab_admin:
+        _admin_tab()
 
 
 def _single_transaction_tab(detector: FraudDetector) -> None:
@@ -101,6 +106,17 @@ def _single_transaction_tab(detector: FraudDetector) -> None:
             "device_type": device_type,
         }
         result = detector.score(transaction)
+
+        # Persist + alert so the Admin tab and any alert channel stay in sync.
+        try:
+            from src import alerts, db
+
+            db.init_db()
+            db.record_prediction(transaction, result, api_key_name="dashboard")
+            alerts.send_alert(transaction, result)
+        except Exception:
+            pass
+
         color = RISK_COLORS.get(result["risk_level"], "#333")
 
         c1, c2, c3 = st.columns(3)
@@ -171,6 +187,44 @@ def _batch_tab(detector: FraudDetector) -> None:
         file_name="scored_transactions.csv",
         mime="text/csv",
     )
+
+
+def _admin_tab() -> None:
+    """Live analytics over everything the API/dashboard has scored."""
+    st.subheader("Operations analytics")
+    st.caption("Aggregated from the FraudShield database (all scored transactions).")
+
+    from src import db
+
+    db.init_db()
+    summary = db.stats_summary()
+
+    if summary["total_transactions"] == 0:
+        st.info(
+            "No transactions scored yet. Score some on the other tabs or via the "
+            "REST API, then refresh."
+        )
+        return
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total scored", f"{summary['total_transactions']:,}")
+    c2.metric("Flagged fraud", f"{summary['fraud_flagged']:,}")
+    c3.metric("Fraud rate", f"{summary['fraud_rate']:.1%}")
+    c4.metric("Avg fraud prob.", f"{summary['avg_fraud_probability']:.0%}")
+
+    if summary["by_risk_level"]:
+        st.write("**By risk level**")
+        risk_order = ["MINIMAL", "LOW", "MEDIUM", "HIGH"]
+        risk_df = pd.DataFrame(
+            {"count": [summary["by_risk_level"].get(r, 0) for r in risk_order]},
+            index=risk_order,
+        )
+        st.bar_chart(risk_df)
+
+    st.write("**Most recent transactions**")
+    recent = db.recent_predictions(limit=50)
+    if recent:
+        st.dataframe(pd.DataFrame(recent), use_container_width=True)
 
 
 main()

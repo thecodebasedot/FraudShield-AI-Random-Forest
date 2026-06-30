@@ -38,17 +38,29 @@ FraudShield-AI-Random-Forest/
 │   ├── train.py            # train, evaluate, persist the model
 │   ├── evaluate.py         # metrics + feature importances
 │   ├── predict.py          # score new transactions (FraudDetector + CLI)
-│   ├── api.py              # FastAPI REST service
-│   ├── dashboard.py        # Streamlit web dashboard
+│   ├── api.py              # FastAPI REST service (auth, persistence, alerts)
+│   ├── db.py               # SQLAlchemy persistence (predictions, audit, keys)
+│   ├── auth.py             # API-key authentication
+│   ├── alerts.py           # real-time Slack / email alerts
+│   ├── dashboard.py        # Streamlit dashboard (+ admin analytics)
 │   ├── compare_models.py   # model comparison + hyperparameter tuning
+│   ├── ensemble.py         # RandomForest + XGBoost + GB soft-voting ensemble
+│   ├── cache.py            # Redis cache (in-memory fallback)
+│   ├── streaming.py        # Kafka streaming pipeline (+ simulation mode)
+│   ├── security.py         # encryption, PAN masking, rate limit, headers
 │   ├── explain.py          # SHAP per-transaction explainability
 │   ├── realdata.py         # train on a real numeric dataset (e.g. Kaggle)
 │   └── visualize.py        # generate evaluation charts
+├── k8s/                    # Kubernetes manifests (deploy, HPA, ingress, ...)
 ├── notebooks/
 │   └── eda.ipynb           # exploratory data analysis
 ├── tests/
 │   ├── test_pipeline.py    # data, training, prediction
-│   └── test_features.py    # SHAP explainer + real-dataset trainer
+│   ├── test_features.py    # SHAP explainer + real-dataset trainer
+│   ├── test_platform.py    # database, auth and alerts
+│   ├── test_scaling.py     # ensemble, cache and streaming
+│   └── test_compliance.py  # security helpers + multi-tenancy
+├── COMPLIANCE.md           # PCI-DSS control mapping
 ├── .github/workflows/      # GitHub Actions CI
 ├── reports/                # generated evaluation charts (PNG)
 ├── data/                   # generated CSVs (git-ignored)
@@ -149,6 +161,130 @@ GradientBoosting     ROC-AUC = 0.853
 Tuned RandomForest   ROC-AUC = 0.865
 ```
 
+## 🏗️ Production platform (auth · persistence · audit · alerts)
+
+FraudShield is more than a model — it ships the operational layer a real
+deployment needs.
+
+### 🔑 API-key authentication
+
+The API runs in **open mode** until you create the first key, then locks down —
+protected endpoints require an `X-API-Key` header. Only a SHA-256 hash is stored.
+
+```bash
+python -m src.auth create --name acme-bank   # prints the key once
+python -m src.auth list
+python -m src.auth revoke --name acme-bank
+
+curl -H "X-API-Key: fsk_..." -X POST http://127.0.0.1:8000/predict -d '{...}'
+```
+
+### 🗄️ Persistence & audit trail
+
+Every prediction and API action is stored via **SQLAlchemy** — SQLite by default,
+PostgreSQL in production by pointing `DATABASE_URL` at it:
+
+```bash
+export DATABASE_URL=postgresql+psycopg://user:pass@host/fraudshield
+```
+
+Tables: `predictions` (scored transactions), `audit_logs` (activity trail), `api_keys`.
+
+### 🔔 Real-time alerts
+
+High-risk transactions trigger a **Slack** and/or **email** alert (with a log
+fallback so nothing is ever lost). All optional, configured via env vars:
+
+| Variable | Purpose |
+|----------|---------|
+| `FRAUDSHIELD_ALERT_LEVEL` | min risk to alert on (default `HIGH`) |
+| `SLACK_WEBHOOK_URL` | Slack incoming webhook |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` | email server |
+| `ALERT_EMAIL_FROM` / `ALERT_EMAIL_TO` | email sender / recipients |
+
+### 📊 Admin analytics
+
+The dashboard's **Admin analytics** tab (and the `/stats` + `/predictions`
+endpoints) show live totals, fraud rate, risk-level breakdown and the most
+recent scored transactions — all read from the database.
+
+## 🏢 Enterprise (multi-tenant · security · Kubernetes)
+
+The features a bank needs before it can buy.
+
+### 🏬 Multi-tenancy
+
+Every API key belongs to a **tenant**. Predictions, audit logs and analytics are
+isolated per tenant — one client never sees another's data.
+
+```bash
+python -m src.auth create --name bank-a-key --tenant bank-a
+python -m src.auth create --name bank-b-key --tenant bank-b
+# /stats and /predictions are automatically scoped to the caller's tenant
+```
+
+### 🔒 Security & PCI-DSS controls (`src/security.py`)
+
+- **Field-level encryption** at rest (Fernet) — `python -m src.security genkey`
+- **PAN masking** — card numbers masked to last 4 before logging
+- **Rate limiting** — per-client token bucket (`RATE_LIMIT_PER_MINUTE`)
+- **Security headers** — HSTS, `X-Frame-Options`, CSP, no-sniff on every response
+
+See **[COMPLIANCE.md](COMPLIANCE.md)** for the full PCI-DSS v4.0 control mapping.
+
+### ☸️ Kubernetes
+
+Production manifests in **[`k8s/`](k8s/)** — Deployment (3 replicas, non-root,
+health probes), Service, ConfigMap, Secret template, TLS Ingress and an HPA that
+autoscales **3 → 20 pods** on CPU/memory.
+
+```bash
+kubectl apply -f k8s/
+```
+
+## ⚡ Scaling (ensemble · caching · streaming)
+
+For high-throughput production, FraudShield adds an ensemble model, a caching
+layer and a streaming pipeline. The cache and stream **degrade gracefully** —
+they run with no Redis/Kafka server and light up automatically when one is present.
+
+### 🧬 Ensemble model (RandomForest + XGBoost + GradientBoosting)
+
+A soft-voting ensemble that blends three complementary tree models:
+
+```bash
+python -m src.ensemble --save        # trains models/fraudshield_ensemble.joblib
+# Then serve it: FRAUDSHIELD_MODEL=models/fraudshield_ensemble.joblib uvicorn src.api:app
+```
+
+> On the simple synthetic data the ensemble is on par with the tuned Random
+> Forest (its real edge shows on richer, higher-dimensional datasets such as the
+> 30-feature Kaggle set). It's a drop-in: any model exposing `predict_proba` works.
+
+### 🚀 Redis caching
+
+Repeat transactions are served from cache instead of re-running the model:
+
+```bash
+export REDIS_URL=redis://localhost:6379/0   # optional; falls back to in-memory
+```
+
+`/predict` responses and the streaming pipeline both use it; `/health` reports
+the active backend (`redis` or `memory`).
+
+### 🌊 Kafka streaming
+
+Score transactions off a Kafka topic in real time — or run the whole pipeline
+in-process with **no broker** via simulation mode:
+
+```bash
+python -m src.streaming simulate --n 100   # no Kafka needed
+python -m src.streaming produce --n 1000   # publish to Kafka
+python -m src.streaming consume            # consume + score + persist + alert
+```
+
+`docker compose up` brings up the API **plus Redis and Kafka** wired together.
+
 ## 🔍 Explainability (SHAP)
 
 Every flag comes with a **reason**. SHAP attributes a prediction to individual
@@ -189,7 +325,8 @@ feature–label correlations (run with `jupyter notebook` from the repo root).
 
 ## 🐳 Docker
 
-Build and run the API in a container (a model is trained at build time):
+Bring up the full stack — API **+ Redis + Kafka** — with one command (a model is
+trained into the API image at build time):
 
 ```bash
 docker compose up --build
@@ -217,6 +354,11 @@ Then visit **http://127.0.0.1:8000/docs** for interactive Swagger UI.
 | POST   | `/predict`        | score a single transaction           |
 | POST   | `/predict/batch`  | score a list of transactions         |
 | POST   | `/explain`        | score **with SHAP reasons**          |
+| GET    | `/stats`          | aggregate analytics (admin)          |
+| GET    | `/predictions`    | recent scored transactions (admin)   |
+
+Every scored transaction is **persisted** to the database, written to an
+**audit trail**, and high-risk transactions fire **real-time alerts** (see below).
 
 ```bash
 curl -X POST http://127.0.0.1:8000/predict \
