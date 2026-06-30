@@ -38,8 +38,11 @@ FraudShield-AI-Random-Forest/
 │   ├── train.py            # train, evaluate, persist the model
 │   ├── evaluate.py         # metrics + feature importances
 │   ├── predict.py          # score new transactions (FraudDetector + CLI)
-│   ├── api.py              # FastAPI REST service
-│   ├── dashboard.py        # Streamlit web dashboard
+│   ├── api.py              # FastAPI REST service (auth, persistence, alerts)
+│   ├── db.py               # SQLAlchemy persistence (predictions, audit, keys)
+│   ├── auth.py             # API-key authentication
+│   ├── alerts.py           # real-time Slack / email alerts
+│   ├── dashboard.py        # Streamlit dashboard (+ admin analytics)
 │   ├── compare_models.py   # model comparison + hyperparameter tuning
 │   ├── explain.py          # SHAP per-transaction explainability
 │   ├── realdata.py         # train on a real numeric dataset (e.g. Kaggle)
@@ -48,7 +51,8 @@ FraudShield-AI-Random-Forest/
 │   └── eda.ipynb           # exploratory data analysis
 ├── tests/
 │   ├── test_pipeline.py    # data, training, prediction
-│   └── test_features.py    # SHAP explainer + real-dataset trainer
+│   ├── test_features.py    # SHAP explainer + real-dataset trainer
+│   └── test_platform.py    # database, auth and alerts
 ├── .github/workflows/      # GitHub Actions CI
 ├── reports/                # generated evaluation charts (PNG)
 ├── data/                   # generated CSVs (git-ignored)
@@ -149,6 +153,53 @@ GradientBoosting     ROC-AUC = 0.853
 Tuned RandomForest   ROC-AUC = 0.865
 ```
 
+## 🏗️ Production platform (auth · persistence · audit · alerts)
+
+FraudShield is more than a model — it ships the operational layer a real
+deployment needs.
+
+### 🔑 API-key authentication
+
+The API runs in **open mode** until you create the first key, then locks down —
+protected endpoints require an `X-API-Key` header. Only a SHA-256 hash is stored.
+
+```bash
+python -m src.auth create --name acme-bank   # prints the key once
+python -m src.auth list
+python -m src.auth revoke --name acme-bank
+
+curl -H "X-API-Key: fsk_..." -X POST http://127.0.0.1:8000/predict -d '{...}'
+```
+
+### 🗄️ Persistence & audit trail
+
+Every prediction and API action is stored via **SQLAlchemy** — SQLite by default,
+PostgreSQL in production by pointing `DATABASE_URL` at it:
+
+```bash
+export DATABASE_URL=postgresql+psycopg://user:pass@host/fraudshield
+```
+
+Tables: `predictions` (scored transactions), `audit_logs` (activity trail), `api_keys`.
+
+### 🔔 Real-time alerts
+
+High-risk transactions trigger a **Slack** and/or **email** alert (with a log
+fallback so nothing is ever lost). All optional, configured via env vars:
+
+| Variable | Purpose |
+|----------|---------|
+| `FRAUDSHIELD_ALERT_LEVEL` | min risk to alert on (default `HIGH`) |
+| `SLACK_WEBHOOK_URL` | Slack incoming webhook |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` | email server |
+| `ALERT_EMAIL_FROM` / `ALERT_EMAIL_TO` | email sender / recipients |
+
+### 📊 Admin analytics
+
+The dashboard's **Admin analytics** tab (and the `/stats` + `/predictions`
+endpoints) show live totals, fraud rate, risk-level breakdown and the most
+recent scored transactions — all read from the database.
+
 ## 🔍 Explainability (SHAP)
 
 Every flag comes with a **reason**. SHAP attributes a prediction to individual
@@ -217,6 +268,11 @@ Then visit **http://127.0.0.1:8000/docs** for interactive Swagger UI.
 | POST   | `/predict`        | score a single transaction           |
 | POST   | `/predict/batch`  | score a list of transactions         |
 | POST   | `/explain`        | score **with SHAP reasons**          |
+| GET    | `/stats`          | aggregate analytics (admin)          |
+| GET    | `/predictions`    | recent scored transactions (admin)   |
+
+Every scored transaction is **persisted** to the database, written to an
+**audit trail**, and high-risk transactions fire **real-time alerts** (see below).
 
 ```bash
 curl -X POST http://127.0.0.1:8000/predict \

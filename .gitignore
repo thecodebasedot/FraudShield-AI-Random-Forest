@@ -15,6 +15,11 @@ models/*.joblib
 models/*.json
 *.log
 
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
 # Notebooks / editors
 .ipynb_checkpoints/
 .vscode/

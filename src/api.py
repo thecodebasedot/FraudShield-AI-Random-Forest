@@ -1,7 +1,9 @@
 """FastAPI REST service for FraudShield AI.
 
 Exposes the trained Random Forest model over HTTP so other systems can score
-transactions in real time.
+transactions in real time. Every scored transaction is persisted, API activity
+is written to an audit trail, high-risk transactions trigger real-time alerts,
+and protected endpoints require an API key once one has been created.
 
 Run it with::
 
@@ -15,10 +17,11 @@ from __future__ import annotations
 import os
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from .model import CATEGORICAL_FEATURES
+from . import alerts, db
+from .auth import require_api_key
 from .predict import DEFAULT_MODEL_PATH, DEFAULT_THRESHOLD, FraudDetector
 
 MODEL_PATH = os.environ.get("FRAUDSHIELD_MODEL", DEFAULT_MODEL_PATH)
@@ -27,11 +30,19 @@ THRESHOLD = float(os.environ.get("FRAUDSHIELD_THRESHOLD", DEFAULT_THRESHOLD))
 app = FastAPI(
     title="FraudShield AI",
     description="Random Forest based fraud detection for bank / online transactions.",
-    version="0.1.0",
+    version="0.2.0",
 )
 
 # Loaded lazily on first use so the app can boot even before a model is trained.
 _detector: FraudDetector | None = None
+
+# Shared auth dependency (open until the first API key is created).
+api_key_dep = require_api_key()
+
+
+@app.on_event("startup")
+def _startup() -> None:
+    db.init_db()
 
 
 def get_detector() -> FraudDetector:
@@ -45,6 +56,20 @@ def get_detector() -> FraudDetector:
                 detail=f"{exc} Train the model first (python -m src.train).",
             ) from exc
     return _detector
+
+
+def _persist_and_alert(transaction: dict, verdict: dict, api_key_name: str | None) -> None:
+    """Record the prediction, audit it and fire alerts — best effort."""
+    try:
+        db.record_prediction(transaction, verdict, api_key_name=api_key_name)
+        db.record_audit(
+            action="predict",
+            api_key_name=api_key_name,
+            detail=f"risk={verdict['risk_level']} p={verdict['fraud_probability']}",
+        )
+    except Exception:  # persistence must never break scoring
+        pass
+    alerts.send_alert(transaction, verdict)
 
 
 class Transaction(BaseModel):
@@ -88,6 +113,7 @@ def root() -> dict:
     return {
         "service": "FraudShield AI",
         "algorithm": "Random Forest",
+        "version": app.version,
         "docs": "/docs",
         "health": "/health",
     }
@@ -101,35 +127,62 @@ def health() -> dict:
         "status": "ok" if model_ready else "model_not_trained",
         "model_path": MODEL_PATH,
         "threshold": THRESHOLD,
+        "database": db.DATABASE_URL.split("://")[0],
     }
 
 
 @app.post("/predict", response_model=Verdict, tags=["scoring"])
-def predict(transaction: Transaction) -> Verdict:
+def predict(transaction: Transaction, api_key_name: str | None = Depends(api_key_dep)) -> Verdict:
     """Score a single transaction."""
     detector = get_detector()
-    result = detector.score(transaction.model_dump())
+    txn = transaction.model_dump()
+    result = detector.score(txn)
+    _persist_and_alert(txn, result, api_key_name)
     return Verdict(**result)
 
 
 @app.post("/predict/batch", response_model=list[Verdict], tags=["scoring"])
-def predict_batch(request: BatchRequest) -> list[Verdict]:
+def predict_batch(
+    request: BatchRequest, api_key_name: str | None = Depends(api_key_dep)
+) -> list[Verdict]:
     """Score many transactions in one call."""
     detector = get_detector()
     if not request.transactions:
         raise HTTPException(status_code=400, detail="No transactions provided.")
-    results = detector.score_many([t.model_dump() for t in request.transactions])
+    txns = [t.model_dump() for t in request.transactions]
+    results = detector.score_many(txns)
+    for txn, result in zip(txns, results):
+        _persist_and_alert(txn, result, api_key_name)
     return [Verdict(**r) for r in results]
 
 
 @app.post("/explain", response_model=ExplainedVerdict, tags=["scoring"])
-def explain(transaction: Transaction) -> ExplainedVerdict:
+def explain(
+    transaction: Transaction, api_key_name: str | None = Depends(api_key_dep)
+) -> ExplainedVerdict:
     """Score a transaction and explain it with SHAP feature attributions."""
     # Imported here so the heavier SHAP dependency only loads if /explain is used.
     from .explain import get_explainer
 
     # Reuse the same model the detector validated is present.
     get_detector()
+    txn = transaction.model_dump()
     explainer = get_explainer(MODEL_PATH)
-    result = explainer.explain(transaction.model_dump())
+    result = explainer.explain(txn)
+    _persist_and_alert(txn, result, api_key_name)
     return ExplainedVerdict(**result)
+
+
+@app.get("/stats", tags=["admin"])
+def stats(api_key_name: str | None = Depends(api_key_dep)) -> dict:
+    """Aggregate analytics over everything scored so far."""
+    return db.stats_summary()
+
+
+@app.get("/predictions", tags=["admin"])
+def predictions(
+    limit: int = 50, api_key_name: str | None = Depends(api_key_dep)
+) -> list[dict]:
+    """Most recent scored transactions (newest first)."""
+    limit = max(1, min(limit, 500))
+    return db.recent_predictions(limit=limit)
