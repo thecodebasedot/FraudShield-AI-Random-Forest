@@ -39,12 +39,17 @@ FraudShield-AI-Random-Forest/
 │   ├── evaluate.py         # metrics + feature importances
 │   ├── predict.py          # score new transactions (FraudDetector + CLI)
 │   ├── api.py              # FastAPI REST service
+│   ├── dashboard.py        # Streamlit web dashboard
+│   ├── compare_models.py   # model comparison + hyperparameter tuning
 │   └── visualize.py        # generate evaluation charts
 ├── tests/
 │   └── test_pipeline.py    # smoke tests for data, training, prediction
+├── .github/workflows/      # GitHub Actions CI
 ├── reports/                # generated evaluation charts (PNG)
 ├── data/                   # generated CSVs (git-ignored)
 ├── models/                 # saved model + metrics (git-ignored)
+├── Dockerfile              # container image (serves the API)
+├── docker-compose.yml
 └── requirements.txt
 ```
 
@@ -107,6 +112,51 @@ verdict = detector.score({
 print(verdict)
 # {'fraud_probability': 0.88, 'is_fraud': True, 'risk_level': 'HIGH'}
 ```
+
+## 🎛️ Interactive dashboard
+
+A **Streamlit** UI to score transactions in the browser — single transaction
+form *and* batch CSV upload with a downloadable scored file.
+
+```bash
+streamlit run src/dashboard.py
+```
+
+Opens at http://localhost:8501. Adjust the decision threshold live from the sidebar.
+
+## 🤖 Model comparison & tuning
+
+FraudShield ships with a Random Forest, but you can verify that choice and tune it:
+
+```bash
+python -m src.compare_models           # 5-fold CV across models + RF tuning
+python -m src.compare_models --save    # persist the tuned best model
+```
+
+It cross-validates **LogisticRegression**, **RandomForest** and **GradientBoosting**
+on ROC-AUC, then runs a `RandomizedSearchCV` over the forest's hyperparameters and
+writes the ranking to `models/comparison.json`. A typical run:
+
+```
+LogisticRegression   ROC-AUC = 0.851
+RandomForest         ROC-AUC = 0.854   <- best
+GradientBoosting     ROC-AUC = 0.853
+Tuned RandomForest   ROC-AUC = 0.865
+```
+
+## 🐳 Docker
+
+Build and run the API in a container (a model is trained at build time):
+
+```bash
+docker compose up --build
+# API now live at http://localhost:8000  (docs at /docs)
+```
+
+## ⚙️ Continuous Integration
+
+Every push / PR runs the test suite plus a train+predict smoke test across
+Python 3.10–3.12 via GitHub Actions (`.github/workflows/ci.yml`).
 
 ## 🌐 REST API
 

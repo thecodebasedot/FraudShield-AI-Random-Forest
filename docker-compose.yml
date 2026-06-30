@@ -1,0 +1,15 @@
+services:
+  api:
+    build: .
+    image: fraudshield-ai
+    container_name: fraudshield-api
+    ports:
+      - "8000:8000"
+    environment:
+      FRAUDSHIELD_THRESHOLD: "0.5"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

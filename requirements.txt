@@ -7,3 +7,6 @@ matplotlib>=3.7
 # REST API
 fastapi>=0.110
 uvicorn[standard]>=0.27
+
+# Dashboard
+streamlit>=1.30
