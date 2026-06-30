@@ -31,6 +31,20 @@ FEATURE_COLUMNS = NUMERIC_FEATURES + CATEGORICAL_FEATURES
 TARGET_COLUMN = "is_fraud"
 
 
+def build_preprocessor() -> ColumnTransformer:
+    """Shared preprocessing: pass numerics through, one-hot the categoricals."""
+    return ColumnTransformer(
+        transformers=[
+            ("num", "passthrough", NUMERIC_FEATURES),
+            (
+                "cat",
+                OneHotEncoder(handle_unknown="ignore"),
+                CATEGORICAL_FEATURES,
+            ),
+        ]
+    )
+
+
 def build_model(
     n_estimators: int = 200,
     max_depth: int | None = None,
@@ -41,16 +55,7 @@ def build_model(
     ``class_weight="balanced"`` makes the forest pay attention to the rare
     fraud class despite the heavy class imbalance.
     """
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ("num", "passthrough", NUMERIC_FEATURES),
-            (
-                "cat",
-                OneHotEncoder(handle_unknown="ignore"),
-                CATEGORICAL_FEATURES,
-            ),
-        ]
-    )
+    preprocessor = build_preprocessor()
 
     classifier = RandomForestClassifier(
         n_estimators=n_estimators,

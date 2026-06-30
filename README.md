@@ -44,6 +44,9 @@ FraudShield-AI-Random-Forest/
 │   ├── alerts.py           # real-time Slack / email alerts
 │   ├── dashboard.py        # Streamlit dashboard (+ admin analytics)
 │   ├── compare_models.py   # model comparison + hyperparameter tuning
+│   ├── ensemble.py         # RandomForest + XGBoost + GB soft-voting ensemble
+│   ├── cache.py            # Redis cache (in-memory fallback)
+│   ├── streaming.py        # Kafka streaming pipeline (+ simulation mode)
 │   ├── explain.py          # SHAP per-transaction explainability
 │   ├── realdata.py         # train on a real numeric dataset (e.g. Kaggle)
 │   └── visualize.py        # generate evaluation charts
@@ -52,7 +55,8 @@ FraudShield-AI-Random-Forest/
 ├── tests/
 │   ├── test_pipeline.py    # data, training, prediction
 │   ├── test_features.py    # SHAP explainer + real-dataset trainer
-│   └── test_platform.py    # database, auth and alerts
+│   ├── test_platform.py    # database, auth and alerts
+│   └── test_scaling.py     # ensemble, cache and streaming
 ├── .github/workflows/      # GitHub Actions CI
 ├── reports/                # generated evaluation charts (PNG)
 ├── data/                   # generated CSVs (git-ignored)
@@ -200,6 +204,49 @@ The dashboard's **Admin analytics** tab (and the `/stats` + `/predictions`
 endpoints) show live totals, fraud rate, risk-level breakdown and the most
 recent scored transactions — all read from the database.
 
+## ⚡ Scaling (ensemble · caching · streaming)
+
+For high-throughput production, FraudShield adds an ensemble model, a caching
+layer and a streaming pipeline. The cache and stream **degrade gracefully** —
+they run with no Redis/Kafka server and light up automatically when one is present.
+
+### 🧬 Ensemble model (RandomForest + XGBoost + GradientBoosting)
+
+A soft-voting ensemble that blends three complementary tree models:
+
+```bash
+python -m src.ensemble --save        # trains models/fraudshield_ensemble.joblib
+# Then serve it: FRAUDSHIELD_MODEL=models/fraudshield_ensemble.joblib uvicorn src.api:app
+```
+
+> On the simple synthetic data the ensemble is on par with the tuned Random
+> Forest (its real edge shows on richer, higher-dimensional datasets such as the
+> 30-feature Kaggle set). It's a drop-in: any model exposing `predict_proba` works.
+
+### 🚀 Redis caching
+
+Repeat transactions are served from cache instead of re-running the model:
+
+```bash
+export REDIS_URL=redis://localhost:6379/0   # optional; falls back to in-memory
+```
+
+`/predict` responses and the streaming pipeline both use it; `/health` reports
+the active backend (`redis` or `memory`).
+
+### 🌊 Kafka streaming
+
+Score transactions off a Kafka topic in real time — or run the whole pipeline
+in-process with **no broker** via simulation mode:
+
+```bash
+python -m src.streaming simulate --n 100   # no Kafka needed
+python -m src.streaming produce --n 1000   # publish to Kafka
+python -m src.streaming consume            # consume + score + persist + alert
+```
+
+`docker compose up` brings up the API **plus Redis and Kafka** wired together.
+
 ## 🔍 Explainability (SHAP)
 
 Every flag comes with a **reason**. SHAP attributes a prediction to individual
@@ -240,7 +287,8 @@ feature–label correlations (run with `jupyter notebook` from the repo root).
 
 ## 🐳 Docker
 
-Build and run the API in a container (a model is trained at build time):
+Bring up the full stack — API **+ Redis + Kafka** — with one command (a model is
+trained into the API image at build time):
 
 ```bash
 docker compose up --build

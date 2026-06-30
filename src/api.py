@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 
 from . import alerts, db
 from .auth import require_api_key
+from .cache import PredictionCache, cached_score
 from .predict import DEFAULT_MODEL_PATH, DEFAULT_THRESHOLD, FraudDetector
 
 MODEL_PATH = os.environ.get("FRAUDSHIELD_MODEL", DEFAULT_MODEL_PATH)
@@ -35,6 +36,9 @@ app = FastAPI(
 
 # Loaded lazily on first use so the app can boot even before a model is trained.
 _detector: FraudDetector | None = None
+
+# Score cache (Redis if REDIS_URL is set and reachable, else in-memory).
+_cache = PredictionCache()
 
 # Shared auth dependency (open until the first API key is created).
 api_key_dep = require_api_key()
@@ -128,15 +132,16 @@ def health() -> dict:
         "model_path": MODEL_PATH,
         "threshold": THRESHOLD,
         "database": db.DATABASE_URL.split("://")[0],
+        "cache_backend": _cache.backend,
     }
 
 
 @app.post("/predict", response_model=Verdict, tags=["scoring"])
 def predict(transaction: Transaction, api_key_name: str | None = Depends(api_key_dep)) -> Verdict:
-    """Score a single transaction."""
+    """Score a single transaction (served from cache when seen recently)."""
     detector = get_detector()
     txn = transaction.model_dump()
-    result = detector.score(txn)
+    result = cached_score(detector, _cache, txn)
     _persist_and_alert(txn, result, api_key_name)
     return Verdict(**result)
 
